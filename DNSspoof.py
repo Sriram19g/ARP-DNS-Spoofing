@@ -44,4 +44,16 @@ def modify_packet(packet):
     del packet[UDP].chksum
 
     return packet
-    
+
+QUEUE_NUM=0
+#iptable Forward rule
+os.system("iptables -I FORWARD -j NFQUEUE --queue-num {}".format(QUEUE_NUM))
+queue=NetfilterQueue()
+
+#binding nfqueue num with callback
+try:
+    queue.bind(QUEUE_NUM,process_packet)
+    queue.run()
+except KeyboardInterrupt:
+    #removing the iptable rule when exit
+    os.system("iptables --flush")
